@@ -22,29 +22,63 @@ The game talks to `api.php` while you play:
 
 | Method | Path | What it does | Success |
 |---|---|---|---|
-| `GET` | `/api.php/scores` | List the top 5 high scores | 200 |
+| `GET` | `/api.php/scores` | List the high scores. Add `?limit=3` to get fewer | 200 |
 | `POST` | `/api.php/scores` | Add a high score: `{"name":"ABC","score":1200}` | 201 |
 | `GET` | `/api.php/games` | List running games | 200 |
-| `POST` | `/api.php/games` | Start a game, returns a `Location` header | 201 |
+| `POST` | `/api.php/games` | Start a game, returns a `Location` header. Body is optional: `{"lives":3}` | 201 |
 | `GET` | `/api.php/games/{id}` | Read one game | 200 |
-| `PATCH` | `/api.php/games/{id}` | Update some fields: `{"score":500,"lives":2}` | 200 |
+| `PUT` | `/api.php/games/{id}` | Replace the whole game: `{"score":500,"lives":2,"level":3}` | 200 |
+| `PATCH` | `/api.php/games/{id}` | Update some fields: `{"score":500}` | 200 |
 | `DELETE` | `/api.php/games/{id}` | End a game | 204 |
+| `OPTIONS` | any of the above | List the allowed methods in the `Allow` header | 204 |
 
-Errors come back as JSON: `400` for invalid JSON, `404` for an unknown URL, `405` for an unsupported method (with an `Allow` header), and `422` for invalid data.
+Errors always come back as JSON, like `{"error": "..."}`:
+
+| Status | When |
+|---|---|
+| `400` | The body is not valid JSON, or a query value is wrong (`?limit=99`) |
+| `404` | Nothing lives at that URL, or the game id does not exist |
+| `405` | The URL does not support that method. The `Allow` header lists the ones it does |
+| `422` | The JSON is valid, but the data breaks a rule (a negative score, PUT with a missing field) |
+| `500` | Something failed on the server, for example it cannot write the data files |
 
 ### When the game calls it
 
 - Page load: `GET /scores`
-- New game: `POST /games`
-- Every 10 seconds, on losing a life and on clearing a level: `PATCH /games/{id}`
+- New game: `POST /games`, sending the starting score, lives and level
+- Every 10 seconds and on losing a life: `PATCH /games/{id}` with only the fields that changed
+- Clearing a level: `PUT /games/{id}` with the whole game
 - Game over: `DELETE /games/{id}`
 - Saving a high score: `POST /scores`, then `GET /scores`
 
-Click any request in the API Inspector to see the full request and response, with a short explanation of the method and status code. You can also send your own requests from the box at the bottom, for example `GET /nope` or `DELETE /scores`.
+After `POST /games`, the game reads the `Location` header to find the URL of the new game, the same way a real client would.
+
+## Learn by experimenting
+
+Click any request in the API Inspector to see the full request and response, a short explanation of the method and status code, and the same request as a `curl` command you can paste into a terminal.
+
+At the bottom of the inspector, **Pick an experiment** fills in a ready-made request and tells you what to look for. Start a game first so the experiments that use `{id}` have a game to work on. Try them in this order:
+
+1. **GET vs POST.** Read the scores, then create one. GET never changes anything. POST creates something new each time.
+2. **Query strings.** `GET /scores?limit=3` filters the list. `?limit=99` gives 400.
+3. **Validation.** Send a 7-letter name or a negative score and get 422. Send half a JSON object and get 400. Can you tell the difference?
+4. **Methods a URL allows.** `DELETE /scores` gives 405. `OPTIONS /games/{id}` tells you what is allowed.
+5. **PUT vs PATCH.** PATCH with only `{"lives":9}` keeps everything else. PUT with only `{"score":10}` is refused, because PUT replaces the whole game.
+6. **Idempotency.** Send the same PUT twice: same result. Send the same DELETE twice: 204, then 404. Send the same POST twice: two new things.
+
+Then try it outside the browser with curl:
+
+```bash
+curl -i localhost:8000/api.php/scores
+curl -i -X POST localhost:8000/api.php/games -d '{"lives":5}'
+curl -i -X OPTIONS localhost:8000/api.php/games
+```
+
+The `-i` flag shows the status line and headers, which is where most of the REST lessons are.
 
 ## Files
 
-- `index.php`: the game page
+- `index.php`: the game page and the API Inspector
 - `api.php`: the REST API
 - `scores.json` and `games.json`: created automatically to store data
 

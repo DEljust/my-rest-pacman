@@ -77,7 +77,7 @@ $scores = json_decode((string) @file_get_contents(__DIR__ . '/scores.json'), tru
 
   /* ---------- API inspector ---------- */
   :root {
-    --color-get: #2ec4b6; --color-post: #9ef01a; --color-patch: #ff9f1c; --color-delete: #ff6b81;
+    --color-get: #2ec4b6; --color-post: #9ef01a; --color-put: #c77dff; --color-patch: #ff9f1c; --color-delete: #ff6b81;
     --color-ok: #9ef01a; --color-warn: #ff9f1c; --color-err: #ff6b81;
     --font-code: ui-monospace, "SF Mono", Menlo, monospace;
   }
@@ -104,7 +104,8 @@ $scores = json_decode((string) @file_get_contents(__DIR__ . '/scores.json'), tru
   .api-log button[aria-current="true"] { background: var(--color-bg); border-color: var(--color-border); }
   .api-log .note { grid-column: 2 / -1; color: var(--color-muted); }
   .m-GET { color: var(--color-get); } .m-POST { color: var(--color-post); }
-  .m-PATCH { color: var(--color-patch); } .m-DELETE { color: var(--color-delete); }
+  .m-PUT { color: var(--color-put); } .m-PATCH { color: var(--color-patch); }
+  .m-DELETE { color: var(--color-delete); } .m-OPTIONS { color: var(--color-muted); }
   .s-2 { color: var(--color-ok); } .s-4 { color: var(--color-warn); } .s-5, .s-0 { color: var(--color-err); }
   .api-detail {
     padding: var(--space-12); border-top: 2px solid var(--color-border); max-height: 360px; overflow-y: auto;
@@ -126,7 +127,8 @@ $scores = json_decode((string) @file_get_contents(__DIR__ . '/scores.json'), tru
     color: var(--color-text); background: var(--color-bg); border: 2px solid var(--color-border);
     border-radius: var(--radius-4); padding: var(--space-4) var(--space-8); min-width: 0;
   }
-  .api-try textarea { grid-column: 1 / -1; resize: vertical; min-height: 48px; }
+  .api-try textarea, .api-try #try-lesson { grid-column: 1 / -1; }
+  .api-try textarea { resize: vertical; min-height: 48px; }
   .api-try button { font-size: var(--fs-12); padding: var(--space-4) var(--space-8); }
   .api-try .hint { grid-column: 1 / -1; color: var(--color-muted); font-family: var(--font-code); }
 </style>
@@ -171,13 +173,16 @@ $scores = json_decode((string) @file_get_contents(__DIR__ . '/scores.json'), tru
     <ol id="api-log" class="api-log"><li class="empty">Requests show up here as you play.</li></ol>
     <div id="api-detail" class="api-detail">Click a request to see what was sent and what came back.</div>
     <form id="api-try" class="api-try">
+      <select id="try-lesson" aria-label="Pick an experiment">
+        <option value="">Pick an experiment…</option>
+      </select>
       <select id="try-method" aria-label="HTTP method">
-        <option>GET</option><option>POST</option><option>PATCH</option><option>DELETE</option>
+        <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>OPTIONS</option>
       </select>
       <input id="try-path" value="/scores" aria-label="Path">
       <button type="submit">SEND</button>
       <textarea id="try-body" aria-label="JSON body" placeholder='JSON body, e.g. {"name":"ABC","score":500}'></textarea>
-      <span class="hint">Try: GET /games · GET /nope · DELETE /scores</span>
+      <span id="try-hint" class="hint">Pick an experiment above, or write your own request.</span>
     </form>
   </section>
 
@@ -285,8 +290,10 @@ const API_BASE = "api.php";
 const METHOD_INFO = {
   GET: "GET reads data. It never changes anything, so it is safe to repeat.",
   POST: "POST creates something new. Sending it twice would create two.",
+  PUT: "PUT replaces the whole resource with what you send, so every field is required. Sending the same PUT twice gives the same result.",
   PATCH: "PATCH changes only the fields you send. Everything else stays the same.",
   DELETE: "DELETE removes the resource. Sending it again gives 404, because it is already gone.",
+  OPTIONS: "OPTIONS asks which methods a URL supports. The answer is in the Allow header.",
 };
 const STATUS_INFO = {
   200: "200 OK: it worked, and the response body has the result.",
@@ -296,7 +303,27 @@ const STATUS_INFO = {
   404: "404 Not Found: there is nothing at that URL.",
   405: "405 Method Not Allowed: this URL does not support that method. The Allow header lists the ones it does.",
   422: "422 Unprocessable: the JSON was readable, but the data in it broke a rule.",
+  500: "500 Internal Server Error: the request was fine, but the server failed. This is the server's fault, not yours.",
 };
+
+// Experiments for the "send your own request" box. {id} is filled in with the current game.
+const LESSONS = [
+  ["Read the high scores", "GET", "/scores", "", "200 OK, and the body is a JSON list."],
+  ["Ask for only the top 3", "GET", "/scores?limit=3", "", "Everything after ? is the query string. It filters a GET without changing the URL of the resource."],
+  ["Send a bad query value", "GET", "/scores?limit=99", "", "400: the server could not use what you sent."],
+  ["Create a high score", "POST", "/scores", '{"name":"YOU","score":100}', "201 Created. The body echoes what was saved."],
+  ["Break a rule", "POST", "/scores", '{"name":"toolong","score":-5}', "422: the JSON is fine, but the data is not allowed. Read the error message."],
+  ["Send broken JSON", "POST", "/scores", '{"name": "ABC", ', "400: the server could not even read the body."],
+  ["Use the wrong method", "DELETE", "/scores", "", "405, plus an Allow header listing the methods that do work."],
+  ["Ask what is allowed", "OPTIONS", "/games/{id}", "", "204 with no body. Look at the Allow header."],
+  ["Visit a URL that does not exist", "GET", "/nope", "", "404 Not Found."],
+  ["List running games", "GET", "/games", "", "Start a game first, then send this. Your game is in the list."],
+  ["Read your current game", "GET", "/games/{id}", "", "Start a game first. GET is safe: send it as often as you like."],
+  ["Change one field with PATCH", "PATCH", "/games/{id}", '{"lives":9}', "Only lives changes. Watch the game: you now have 9 lives on the server, but not on screen."],
+  ["PUT with a missing field", "PUT", "/games/{id}", '{"score":10}', "422: PUT replaces everything, so it needs every field."],
+  ["Replace the game with PUT", "PUT", "/games/{id}", '{"score":0,"lives":1,"level":1}', "200. Send it twice: the result is the same. That is what idempotent means."],
+  ["Delete the game (send it twice)", "DELETE", "/games/{id}", "", "First time 204, second time 404, because it is already gone."],
+];
 const apiLog = [];
 let selectedEntry = null;
 
@@ -307,7 +334,7 @@ async function api(method, path, body = null, note = "") {
     headers["Content-Type"] = "application/json";
     init.body = typeof body === "string" ? body : JSON.stringify(body);
   }
-  const entry = { method, url: "/" + API_BASE + path, note, reqHeaders: headers, reqBody: init.body ?? null,
+  const entry = { method, url: "/" + API_BASE + path, fullUrl: new URL(API_BASE + path, location.href).href, note, reqHeaders: headers, reqBody: init.body ?? null,
                   status: 0, statusText: "pending…", resHeaders: {}, resBody: null, ms: 0 };
   apiLog.unshift(entry);
   if (apiLog.length > 50) apiLog.pop();
@@ -363,13 +390,28 @@ function renderDetail(e) {
   let reqBody = e.reqBody;
   try { reqBody = reqBody && JSON.parse(reqBody); } catch { /* show raw text */ }
   const statusInfo = STATUS_INFO[e.status] || (e.status >= 500 ? "5xx: something broke on the server." : "");
+  const quote = s => "'" + s.replace(/'/g, "'\\''") + "'";
+  const curl = ["curl -i", e.method !== "GET" && `-X ${e.method}`, quote(e.fullUrl),
+                e.reqBody && `-H 'Content-Type: application/json' -d ${quote(e.reqBody)}`].filter(Boolean).join(" ");
   box.replaceChildren(head, status,
     el("p", "", METHOD_INFO[e.method] || ""), el("p", "", statusInfo),
     el("h3", "", "REQUEST"), el("pre", "", `${e.method} ${e.url}\n${lines(e.reqHeaders)}\n\n${pretty(reqBody)}`),
-    el("h3", "", "RESPONSE"), el("pre", "", `${e.status} ${e.statusText}\n${lines(e.resHeaders)}\n\n${pretty(e.resBody)}`));
+    el("h3", "", "RESPONSE"), el("pre", "", `${e.status} ${e.statusText}\n${lines(e.resHeaders)}\n\n${pretty(e.resBody)}`),
+    el("h3", "", "SAME REQUEST WITH CURL"), el("pre", "", curl));
 }
 
 document.getElementById("api-clear").addEventListener("click", () => { apiLog.length = 0; selectedEntry = null; renderLog(); });
+const lessonSelect = document.getElementById("try-lesson");
+LESSONS.forEach(([title], i) => lessonSelect.append(new Option(title, i)));
+lessonSelect.addEventListener("change", () => {
+  const lesson = LESSONS[lessonSelect.value];
+  if (!lesson) return;
+  const [, method, path, body, notice] = lesson;
+  document.getElementById("try-method").value = method;
+  document.getElementById("try-path").value = path.replace("{id}", gameId || "{id}");
+  document.getElementById("try-body").value = body;
+  document.getElementById("try-hint").textContent = "What to notice: " + notice;
+});
 document.getElementById("api-try").addEventListener("submit", e => {
   e.preventDefault();
   let path = document.getElementById("try-path").value.trim() || "/";
@@ -379,9 +421,11 @@ document.getElementById("api-try").addEventListener("submit", e => {
 });
 
 // Game calls run one after another, so a game is always created before it is updated or deleted.
-let gameId = null, apiQueue = Promise.resolve(), saveClock = 0;
+// gamePath comes from the Location header of POST /games, the way a real client finds a new resource.
+let gameId = null, gamePath = null, apiQueue = Promise.resolve(), saveClock = 0;
 const gameCall = fn => { apiQueue = apiQueue.then(fn).catch(() => {}); };
-const patchGame = (fields, note) => gameCall(() => gameId && api("PATCH", `/games/${gameId}`, fields, note));
+const patchGame = (fields, note) => gameCall(() => gamePath && api("PATCH", gamePath, fields, note));
+const putGame = note => gameCall(() => gamePath && api("PUT", gamePath, { score, lives, level }, note));
 
 // ---------- state ----------
 let grid, chipsLeft, player, bugs, popups = [];
@@ -405,10 +449,13 @@ function newGame() {
   loadMaze(); resetActors();
   state = "ready"; stateT = 0; paused = false; saveClock = 0;
   sfx.start();
-  gameId = null;
+  gameId = gamePath = null;
   gameCall(async () => {
-    const r = await api("POST", "/games", null, "new game started");
-    gameId = r.status === 201 ? r.resBody.id : null;
+    const r = await api("POST", "/games", { score, lives, level }, "new game started");
+    const loc = r.resHeaders.location;
+    if (r.status !== 201 || !loc) return;
+    gameId = r.resBody.id;
+    gamePath = loc.slice(loc.indexOf(API_BASE) + API_BASE.length);
   });
 }
 
@@ -535,7 +582,7 @@ function update(dt) {
   }
   if (state === "clear" && stateT > 2) {
     level++; loadMaze(); resetActors(); state = "ready"; stateT = 0;
-    patchGame({ level, score }, "level cleared");
+    putGame("level cleared, so save the whole game");
   }
   if (state !== "play") return;
 
@@ -654,7 +701,7 @@ function renderScores() {
 }
 function gameOver() {
   state = "over"; stateT = 0;
-  gameCall(() => gameId && api("DELETE", `/games/${gameId}`, null, "game over, so delete it"));
+  gameCall(() => gamePath && api("DELETE", gamePath, null, "game over, so delete it"));
   if (score > 0 && (scores.length < 5 || score > scores[scores.length - 1].score)) {
     entry.classList.add("open");
     nameInput.value = "";
