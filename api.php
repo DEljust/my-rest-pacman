@@ -13,6 +13,9 @@ declare(strict_types=1);
 //   PATCH   /api.php/games/{id}        update some fields         body: {"score":500}
 //   DELETE  /api.php/games/{id}        end a game -> 204 No Content
 //   OPTIONS (any of the above)         list the allowed methods in the Allow header
+//
+//   /games/{id} sends an ETag. GET with If-None-Match gives 304 if nothing changed,
+//   PUT/PATCH with If-Match gives 412 if the game changed since you read it.
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -61,6 +64,11 @@ function with_store(string $file, callable $fn): mixed
         flock($fp, LOCK_UN);
         fclose($fp);
     }
+}
+
+function etag(array $game): string
+{
+    return '"' . substr(md5(json_encode($game)), 0, 12) . '"';
 }
 
 // Check that every given field is a whole number of 0 or more, or fail with 422.
@@ -143,7 +151,10 @@ $notFound = "There is no game with id \"$id\".";
 
 if ($method === 'GET') {
     $game = with_store('games.json', fn($g) => [$g, $g[$id] ?? null]);
-    $game ? respond(200, $game) : fail(404, $notFound);
+    if (!$game) fail(404, $notFound);
+    $tag = etag($game);
+    if (($_SERVER['HTTP_IF_NONE_MATCH'] ?? null) === $tag) respond(304, null, ['ETag' => $tag]);
+    respond(200, $game, ['ETag' => $tag]);
 }
 
 if ($method === 'PUT' || $method === 'PATCH') {
@@ -153,12 +164,16 @@ if ($method === 'PUT' || $method === 'PATCH') {
     }
     if (!$changes) fail(422, 'Send at least one of "score", "lives" or "level".');
     check_counts($changes);
-    $game = with_store('games.json', function ($g) use ($id, $changes) {
+    $ifMatch = $_SERVER['HTTP_IF_MATCH'] ?? null;
+    $game = with_store('games.json', function ($g) use ($id, $changes, $ifMatch) {
         if (!isset($g[$id])) return [$g, null];
+        if ($ifMatch !== null && $ifMatch !== etag($g[$id])) return [$g, false];
         $g[$id] = array_merge($g[$id], $changes, ['updated_at' => date('c')]);
         return [$g, $g[$id]];
     });
-    $game ? respond(200, $game) : fail(404, $notFound);
+    if ($game === null) fail(404, $notFound);
+    if ($game === false) fail(412, 'The game changed since you read it, so your If-Match ETag is out of date. GET it again for the new ETag.');
+    respond(200, $game, ['ETag' => etag($game)]);
 }
 
 // DELETE

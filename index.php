@@ -127,7 +127,7 @@ $scores = json_decode((string) @file_get_contents(__DIR__ . '/scores.json'), tru
     color: var(--color-text); background: var(--color-bg); border: 2px solid var(--color-border);
     border-radius: var(--radius-4); padding: var(--space-4) var(--space-8); min-width: 0;
   }
-  .api-try textarea, .api-try #try-lesson { grid-column: 1 / -1; }
+  .api-try textarea, .api-try #try-lesson, .api-try #try-header { grid-column: 1 / -1; }
   .api-try textarea { resize: vertical; min-height: 48px; }
   .api-try button { font-size: var(--fs-12); padding: var(--space-4) var(--space-8); }
   .api-try .hint { grid-column: 1 / -1; color: var(--color-muted); font-family: var(--font-code); }
@@ -181,6 +181,7 @@ $scores = json_decode((string) @file_get_contents(__DIR__ . '/scores.json'), tru
       </select>
       <input id="try-path" value="/scores" aria-label="Path">
       <button type="submit">SEND</button>
+      <input id="try-header" aria-label="Extra header" placeholder='Extra header (optional), e.g. If-Match: "abc123"'>
       <textarea id="try-body" aria-label="JSON body" placeholder='JSON body, e.g. {"name":"ABC","score":500}'></textarea>
       <span id="try-hint" class="hint">Pick an experiment above, or write your own request.</span>
     </form>
@@ -299,9 +300,11 @@ const STATUS_INFO = {
   200: "200 OK: it worked, and the response body has the result.",
   201: "201 Created: something new now exists. The Location header gives its URL.",
   204: "204 No Content: it worked, and there is nothing to send back.",
+  304: "304 Not Modified: your If-None-Match ETag still matches, so nothing changed and no body is sent. Your copy is up to date.",
   400: "400 Bad Request: the server could not read the body. Is it valid JSON?",
   404: "404 Not Found: there is nothing at that URL.",
   405: "405 Method Not Allowed: this URL does not support that method. The Allow header lists the ones it does.",
+  412: "412 Precondition Failed: your If-Match ETag is out of date. Someone changed the resource after you read it, so the server refused to overwrite it.",
   422: "422 Unprocessable: the JSON was readable, but the data in it broke a rule.",
   500: "500 Internal Server Error: the request was fine, but the server failed. This is the server's fault, not yours.",
 };
@@ -323,12 +326,14 @@ const LESSONS = [
   ["PUT with a missing field", "PUT", "/games/{id}", '{"score":10}', "422: PUT replaces everything, so it needs every field."],
   ["Replace the game with PUT", "PUT", "/games/{id}", '{"score":0,"lives":1,"level":1}', "200. Send it twice: the result is the same. That is what idempotent means."],
   ["Delete the game (send it twice)", "DELETE", "/games/{id}", "", "First time 204, second time 404, because it is already gone."],
+  ["Ask if the game changed (ETag)", "GET", "/games/{id}", "", "Read your game first and look at the ETag header. This sends it back in If-None-Match: 304 if nothing changed. The game saves every 10 seconds, so wait too long and you get 200 with a new ETag.", "If-None-Match: {etag}"],
+  ["Update only if nobody else did", "PATCH", "/games/{id}", '{"lives":5}', "If-Match says: only change it if it still has this ETag. Send it twice: 200, then 412, because your first PATCH changed the ETag.", "If-Match: {etag}"],
 ];
 const apiLog = [];
-let selectedEntry = null;
+let selectedEntry = null, lastEtag = null;
 
-async function api(method, path, body = null, note = "") {
-  const headers = { Accept: "application/json" };
+async function api(method, path, body = null, note = "", extra = {}) {
+  const headers = { Accept: "application/json", ...extra };
   const init = { method, headers };
   if (body !== null && body !== "") {
     headers["Content-Type"] = "application/json";
@@ -345,7 +350,8 @@ async function api(method, path, body = null, note = "") {
     entry.status = res.status;
     // PHP's dev server doesn't know the name for 422, so fill it in
     entry.statusText = res.status === 422 ? "Unprocessable Content" : res.statusText;
-    for (const h of ["content-type", "location", "allow"]) {
+    lastEtag = res.headers.get("etag") || lastEtag;
+    for (const h of ["content-type", "location", "allow", "etag"]) {
       const v = res.headers.get(h);
       if (v) entry.resHeaders[h] = v;
     }
@@ -391,7 +397,8 @@ function renderDetail(e) {
   try { reqBody = reqBody && JSON.parse(reqBody); } catch { /* show raw text */ }
   const statusInfo = STATUS_INFO[e.status] || (e.status >= 500 ? "5xx: something broke on the server." : "");
   const quote = s => "'" + s.replace(/'/g, "'\\''") + "'";
-  const curl = ["curl -i", e.method !== "GET" && `-X ${e.method}`, quote(e.fullUrl),
+  const extra = Object.entries(e.reqHeaders).filter(([k]) => k !== "Accept" && k !== "Content-Type").map(([k, v]) => `-H ${quote(`${k}: ${v}`)}`);
+  const curl = ["curl -i", e.method !== "GET" && `-X ${e.method}`, quote(e.fullUrl), ...extra,
                 e.reqBody && `-H 'Content-Type: application/json' -d ${quote(e.reqBody)}`].filter(Boolean).join(" ");
   box.replaceChildren(head, status,
     el("p", "", METHOD_INFO[e.method] || ""), el("p", "", statusInfo),
@@ -406,10 +413,11 @@ LESSONS.forEach(([title], i) => lessonSelect.append(new Option(title, i)));
 lessonSelect.addEventListener("change", () => {
   const lesson = LESSONS[lessonSelect.value];
   if (!lesson) return;
-  const [, method, path, body, notice] = lesson;
+  const [, method, path, body, notice, header = ""] = lesson;
   document.getElementById("try-method").value = method;
   document.getElementById("try-path").value = path.replace("{id}", gameId || "{id}");
   document.getElementById("try-body").value = body;
+  document.getElementById("try-header").value = header.replace("{etag}", lastEtag || "{etag}");
   document.getElementById("try-hint").textContent = "What to notice: " + notice;
 });
 document.getElementById("api-try").addEventListener("submit", e => {
@@ -417,7 +425,9 @@ document.getElementById("api-try").addEventListener("submit", e => {
   let path = document.getElementById("try-path").value.trim() || "/";
   if (!path.startsWith("/")) path = "/" + path;
   selectedEntry = null;
-  api(document.getElementById("try-method").value, path, document.getElementById("try-body").value.trim(), "sent by you");
+  const [name, ...value] = document.getElementById("try-header").value.split(":");
+  const extra = value.length && name.trim() ? { [name.trim()]: value.join(":").trim() } : {};
+  api(document.getElementById("try-method").value, path, document.getElementById("try-body").value.trim(), "sent by you", extra);
 });
 
 // Game calls run one after another, so a game is always created before it is updated or deleted.

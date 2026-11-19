@@ -32,6 +32,13 @@ The game talks to `api.php` while you play:
 | `DELETE` | `/api.php/games/{id}` | End a game | 204 |
 | `OPTIONS` | any of the above | List the allowed methods in the `Allow` header | 204 |
 
+`/games/{id}` also sends an `ETag` header, a short fingerprint of the game. Send it back to make a request conditional:
+
+| Header | On | What happens |
+|---|---|---|
+| `If-None-Match: "<etag>"` | `GET` | `304 Not Modified` with no body if the game has not changed |
+| `If-Match: "<etag>"` | `PUT`, `PATCH` | `412 Precondition Failed` if someone changed the game since you read it |
+
 Errors always come back as JSON, like `{"error": "..."}`:
 
 | Status | When |
@@ -39,6 +46,7 @@ Errors always come back as JSON, like `{"error": "..."}`:
 | `400` | The body is not valid JSON, or a query value is wrong (`?limit=99`) |
 | `404` | Nothing lives at that URL, or the game id does not exist |
 | `405` | The URL does not support that method. The `Allow` header lists the ones it does |
+| `412` | Your `If-Match` ETag is out of date |
 | `422` | The JSON is valid, but the data breaks a rule (a negative score, PUT with a missing field) |
 | `500` | Something failed on the server, for example it cannot write the data files |
 
@@ -65,6 +73,7 @@ At the bottom of the inspector, **Pick an experiment** fills in a ready-made req
 4. **Methods a URL allows.** `DELETE /scores` gives 405. `OPTIONS /games/{id}` tells you what is allowed.
 5. **PUT vs PATCH.** PATCH with only `{"lives":9}` keeps everything else. PUT with only `{"score":10}` is refused, because PUT replaces the whole game.
 6. **Idempotency.** Send the same PUT twice: same result. Send the same DELETE twice: 204, then 404. Send the same POST twice: two new things.
+7. **ETags.** Read your game and note the `ETag`. Ask again with `If-None-Match` and get 304. PATCH with `If-Match` twice: 200, then 412, because the first one changed the game.
 
 Then try it outside the browser with curl:
 
